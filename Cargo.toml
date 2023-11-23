@@ -5,6 +5,14 @@ edition = "2021"
 authors = ["Deeton Rushton"]
 description = "A networking layer for communication."
 readme = "README.md"
+repository = "https://github.com/deetonn/suave"
+license = "MIT"
+keywords = ["network", "tcp", "web"]
+rust-version = "1.73.0"
+include = ["/src", "LICENSE"]
+publish = true
+homepage = "https://github.com/deetonn/suave"
+documentation = "https://github.com/deetonn/suave"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
