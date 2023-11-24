@@ -409,6 +409,21 @@ mod tests {
 
         assert!(resource.is_locked().await?);
         drop(lock);
+        assert!(!resource.is_locked().await?);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_lockfile_multiple_opens() -> Result<()> {
+        let resource = LockFile::connect("shared_resource_3").await?;
+        let _lock = resource.lock().await?;
+
+        assert!(resource.is_locked().await?);
+        let faulty_lock = resource.lock().await;
+
+        // should fail because its already locked above.
+        assert!(faulty_lock.is_err());
 
         Ok(())
     }
