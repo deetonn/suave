@@ -1,5 +1,6 @@
 use std::{
     io::{Error, ErrorKind},
+    marker::PhantomData,
     path::Path,
 };
 
@@ -7,17 +8,26 @@ use std::{
 // the same length as the LockFile, so it can keep a reference to it, and close it when it is
 // dropped.
 
-use tokio::fs::File;
+use tokio::fs::{File, OpenOptions};
 
 /// The result type used in this library. This just wraps `std::io::Error`.
 pub type Result<T> = std::result::Result<T, std::io::Error>;
 
 /// The exact size in bytes a file must be to have a state of
 /// `LockState::Locked`.
-pub const FLAG_LOCKED: usize = 77;
+pub const FLAG_LOCKED: u64 = 77;
 /// The exact size in bytes a file must be to have a state of
 /// `LockState::Unlocked`
-pub const FLAG_UNLOCKED: usize = 88;
+pub const FLAG_UNLOCKED: u64 = 88;
+
+pub(crate) async fn open_rw(path: impl AsRef<str>) -> Result<File> {
+    OpenOptions::new()
+        .write(true)
+        .read(true)
+        .create(true)
+        .open(path.as_ref())
+        .await
+}
 
 /// Which state a lockfile is in.
 /// This information is gathered by reading the files size
@@ -31,15 +41,57 @@ pub enum LockState {
     NotALock,
 }
 
+/// An instance of this represents a `LockFile` that is currently locked.
+/// Once this goes out of scope, the `LockFile` is unlocked.
+pub struct Lock<'lock> {
+    parent: &'lock LockFile<'lock>,
+}
+
+impl<'lock> Lock<'lock> {
+    /// Create the lock with the `LockFile` referenced. When
+    /// this instance is dropped, `parent.unlock()` is called.
+    ///
+    /// **NOTE**: Shouldn't be called manually usually.
+    pub fn new(parent: &'lock LockFile) -> Self {
+        Self { parent }
+    }
+}
+
+/// This causes this object to automatically unlock the `LockFile` once it goes
+/// out of scope.
+impl<'lock> Drop for Lock<'lock> {
+    fn drop(&mut self) {
+        eprintln!("dropping file: {}", self.parent._path);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.parent._path);
+
+        if let Err(e) = file {
+            panic!(
+                "failed to open lockfile to unlock it in Lock::drop(): {}",
+                e
+            );
+        }
+
+        let file = file.unwrap();
+        match file.set_len(FLAG_UNLOCKED) {
+            Ok(_) => {}
+            Err(e) => panic!("failed to unlock file by `file.set_len(...)`: {}", e),
+        };
+    }
+}
+
 /// Represents a lockfile. This file does not exclusively lock
 /// any other file, it just provides mechanisms of knowing what
 /// state it is in without actually reading the file.
-pub struct LockFile {
+pub struct LockFile<'a> {
     _path: String,
     _fh: tokio::fs::File,
+    _phantom: PhantomData<&'a ()>,
 }
 
-impl LockFile {
+impl<'a> LockFile<'a> {
     /// Connect to the lock, storing information about it. This connection
     /// will be created if the lock does not yet exist.
     ///
@@ -51,28 +103,21 @@ impl LockFile {
     ///
     /// This basically acts as a mutex for whatever file you are trying
     /// to restrict to one writer at a time.
-    pub async fn connect(name: impl AsRef<str>) -> Result<LockFile> {
+    pub async fn connect(name: impl AsRef<str>) -> Result<LockFile<'a>> {
         let true_path = {
             let tmp_dir = temporary_directory();
             let id = NamedPipe::generate_unique_id(name.as_ref());
             format!("{}{}.lock", tmp_dir, id)
         };
-        let path = Path::new(&true_path);
-        if !path.exists() {
-            let file_handle = tokio::fs::File::create(&path).await?;
-            file_handle.set_len(FLAG_UNLOCKED as u64).await?;
-            Ok(Self {
-                _path: true_path,
-                _fh: file_handle,
-            })
-        } else {
-            let file_handle = tokio::fs::File::open(&path).await?;
-            file_handle.set_len(FLAG_UNLOCKED as u64).await?;
-            Ok(Self {
-                _path: true_path,
-                _fh: file_handle,
-            })
-        }
+
+        let file_handle = open_rw(name).await?;
+        file_handle.set_len(FLAG_UNLOCKED).await?;
+
+        Ok(Self {
+            _path: true_path,
+            _fh: file_handle,
+            _phantom: PhantomData,
+        })
     }
 
     /// Get whether the lock is currently locked or not. This returns a result
@@ -81,7 +126,7 @@ impl LockFile {
     /// This function just gets the metadata, and returns if the file size is equal to `FLAG_LOCKED`.
     pub async fn is_locked(&self) -> Result<bool> {
         let metadata = self._fh.metadata().await?;
-        Ok(metadata.len() as usize == FLAG_LOCKED)
+        Ok(metadata.len() == FLAG_LOCKED)
     }
 
     /// The path to the lockfile. This will always return the path, but does not guarantee
@@ -109,21 +154,36 @@ impl LockFile {
     ///     // ...
     /// }
     /// ```
-    ///
-    /// **NOTE**: Better ways of doing this will come soon, such as a `Lock<'_>`
-    /// being returned that will automatically unlock when dropped.
-    ///
-    /// This function returns `Ok(false)` when the file is already locked,
+    /// This returns `Ok(false)` if the file is already locked.
     /// and `Ok(true)` when the file has been locked and is now owned by you.
     ///
     /// Any error returned is to do with failure reading the files metadata.
     pub async fn try_lock(&self) -> Result<bool> {
         let metadata = self._fh.metadata().await?;
-        if metadata.len() as usize == FLAG_LOCKED {
+        if metadata.len() == FLAG_LOCKED {
             return Ok(false);
         }
-        self._fh.set_len(FLAG_UNLOCKED as u64).await?;
+        self._fh.set_len(FLAG_LOCKED).await?;
         Ok(true)
+    }
+
+    /// Lock the file, with the returned `Lock<'_>` being the locker.
+    /// Whenever that instance is dropped, the lockfile is unlocked.
+    ///
+    /// # Example
+    /// ```
+    /// let resource = LockFile::connect("resource")?;
+    /// let lock = resource.lock();
+    /// // do stuff...
+    /// drop(lock); // lockfile is now available.
+    /// ```
+    pub async fn lock(&'a self) -> Result<Lock<'a>> {
+        let is_locked = self.try_lock().await?;
+        if is_locked {
+            Ok(Lock::new(self))
+        } else {
+            Err(Error::new(ErrorKind::Other, "the file is already locked."))
+        }
     }
 
     /// Attempt the unlock the file. Only call this function if you know that you
@@ -135,10 +195,10 @@ impl LockFile {
     /// Otherwise, the file is marked as unlocked and `Ok(())` is returned.
     pub async fn unlock(&self) -> Result<()> {
         let metadata = self._fh.metadata().await?;
-        if metadata.len() as usize != FLAG_LOCKED {
+        if metadata.len() != FLAG_LOCKED {
             return Err(Error::new(ErrorKind::Other, "the file is not locked."));
         }
-        self._fh.set_len(FLAG_UNLOCKED as u64).await?;
+        self._fh.set_len(FLAG_UNLOCKED).await?;
         Ok(())
     }
 
@@ -179,7 +239,7 @@ impl LockFile {
         let file = tokio::fs::File::open(fully_qual_path).await?;
 
         // Do no checking here.
-        file.set_len(FLAG_UNLOCKED as u64).await?;
+        file.set_len(FLAG_UNLOCKED).await?;
 
         Ok(())
     }
@@ -217,13 +277,13 @@ impl LockFile {
         let file = tokio::fs::File::open(&path).await?;
         let metadata = file.metadata().await?;
 
-        if metadata.len() as usize == FLAG_LOCKED {
+        if metadata.len() == FLAG_LOCKED {
             return Err(Error::new(
                 ErrorKind::WouldBlock,
                 "the lockfile is currently locked.",
             ));
         }
-        file.set_len(FLAG_LOCKED as u64).await?;
+        file.set_len(FLAG_LOCKED).await?;
 
         Ok(())
     }
@@ -314,13 +374,36 @@ impl NamedPipe {
 
         for ch in path.chars() {
             let ch = ch as u8;
-            if ch > 96 {
-                result.push((ch - 32) as char);
+            if ch > 90 {
+                result.push((ch - 38) as char);
             } else {
-                result.push((ch + 32) as char);
+                result.push((ch + 38) as char);
             }
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn test_create_lockfile() -> Result<()> {
+        LockFile::connect("shared_resource").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_lockfile_lock() -> Result<()> {
+        let resource = LockFile::connect("shared_resource_2").await?;
+        let lock = resource.lock().await?;
+
+        eprintln!("locking and unlocking file: `{}`", resource._path);
+
+        assert!(resource.is_locked().await?);
+        drop(lock);
+
+        Ok(())
     }
 }
