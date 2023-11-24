@@ -121,6 +121,11 @@ impl<'a> LockFile<'a> {
         })
     }
 
+    pub async fn exists(identifier: impl AsRef<str>) -> bool {
+        let path = format!("{}{}.lock", temporary_directory(), identifier.as_ref());
+        Path::new(&path).exists()
+    }
+
     /// Get whether the lock is currently locked or not. This returns a result
     /// because if the file is deleted, reading the metadata would fail.
     ///
@@ -354,19 +359,8 @@ impl NamedPipe {
     /// ```
     /// This only works if the lockfile exists aswell as the main shared resource.
     pub fn exists(identifier: impl AsRef<str>) -> bool {
-        let unique_id = Self::generate_unique_id(identifier.as_ref());
-        let actual_file = format!("{}{}.pipe", temporary_directory(), unique_id);
-        let lock_file = format!("{}{}.lock", temporary_directory(), unique_id);
-
-        if !Path::new(&lock_file).exists() {
-            return false;
-        }
-
-        if !Path::new(&actual_file).exists() {
-            return false;
-        }
-
-        true
+        let path = format!("{}{}.")
+        return Path::new("{}{}.lock")
     }
 
     /// Generate unique identifiers for any string. This is not random
