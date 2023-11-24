@@ -1,4 +1,6 @@
-<p style="text-align: center;">suave is a library for acheiving interprocess communication easily. It is 100% async.</p>
+# Suave :sunglasses:
+Multi-process and interprocess communication library focused on getting things
+up and working. It is 100% async and written in pure rust.
 
 # Pipes
 
