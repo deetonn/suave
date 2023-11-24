@@ -405,8 +405,6 @@ mod tests {
         let resource = LockFile::connect("shared_resource_2").await?;
         let lock = resource.lock().await?;
 
-        eprintln!("locking and unlocking file: `{}`", resource._path);
-
         assert!(resource.is_locked().await?);
         drop(lock);
         assert!(!resource.is_locked().await?);
