@@ -21,10 +21,11 @@ pub const FLAG_LOCKED: u64 = 77;
 pub const FLAG_UNLOCKED: u64 = 88;
 
 pub(crate) async fn open_rw(path: impl AsRef<str>) -> Result<File> {
+    let exists = Path::new(path.as_ref()).exists();
     OpenOptions::new()
         .write(true)
         .read(true)
-        .create(true)
+        .create(!exists)
         .open(path.as_ref())
         .await
 }
@@ -61,7 +62,6 @@ impl<'lock> Lock<'lock> {
 /// out of scope.
 impl<'lock> Drop for Lock<'lock> {
     fn drop(&mut self) {
-        eprintln!("dropping file: {}", self.parent._path);
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -69,8 +69,8 @@ impl<'lock> Drop for Lock<'lock> {
 
         if let Err(e) = file {
             panic!(
-                "failed to open lockfile to unlock it in Lock::drop(): {}",
-                e
+                "failed to open lockfile to unlock it in Lock::drop(): {} (file: {})",
+                e, self.parent._path,
             );
         }
 
@@ -106,12 +106,13 @@ impl<'a> LockFile<'a> {
     pub async fn connect(name: impl AsRef<str>) -> Result<LockFile<'a>> {
         let true_path = {
             let tmp_dir = temporary_directory();
-            let id = NamedPipe::generate_unique_id(name.as_ref());
-            format!("{}{}.lock", tmp_dir, id)
+            format!("{}{}.lock", tmp_dir, name.as_ref())
         };
 
-        let file_handle = open_rw(name).await?;
+        let file_handle = open_rw(&true_path).await?;
         file_handle.set_len(FLAG_UNLOCKED).await?;
+
+        file_handle.sync_all().await?;
 
         Ok(Self {
             _path: true_path,
@@ -125,6 +126,7 @@ impl<'a> LockFile<'a> {
     ///
     /// This function just gets the metadata, and returns if the file size is equal to `FLAG_LOCKED`.
     pub async fn is_locked(&self) -> Result<bool> {
+        self._fh.sync_all().await?;
         let metadata = self._fh.metadata().await?;
         Ok(metadata.len() == FLAG_LOCKED)
     }
@@ -164,6 +166,7 @@ impl<'a> LockFile<'a> {
             return Ok(false);
         }
         self._fh.set_len(FLAG_LOCKED).await?;
+        self._fh.sync_all().await?;
         Ok(true)
     }
 
@@ -178,6 +181,7 @@ impl<'a> LockFile<'a> {
     /// drop(lock); // lockfile is now available.
     /// ```
     pub async fn lock(&'a self) -> Result<Lock<'a>> {
+        self._fh.sync_all().await?;
         let is_locked = self.try_lock().await?;
         if is_locked {
             Ok(Lock::new(self))
@@ -194,11 +198,13 @@ impl<'a> LockFile<'a> {
     ///
     /// Otherwise, the file is marked as unlocked and `Ok(())` is returned.
     pub async fn unlock(&self) -> Result<()> {
+        self._fh.sync_all().await?;
         let metadata = self._fh.metadata().await?;
         if metadata.len() != FLAG_LOCKED {
             return Err(Error::new(ErrorKind::Other, "the file is not locked."));
         }
         self._fh.set_len(FLAG_UNLOCKED).await?;
+        self._fh.sync_all().await?;
         Ok(())
     }
 
