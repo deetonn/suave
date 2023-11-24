@@ -8,7 +8,11 @@ use std::{
 // the same length as the LockFile, so it can keep a reference to it, and close it when it is
 // dropped.
 
-use tokio::fs::{File, OpenOptions};
+use tokio::{
+    fs::{File, OpenOptions},
+    io::{AsyncReadExt, AsyncWriteExt},
+    time::sleep_until,
+};
 
 /// The result type used in this library. This just wraps `std::io::Error`.
 pub type Result<T> = std::result::Result<T, std::io::Error>;
@@ -40,6 +44,26 @@ pub enum LockState {
     Locked,
     /// This is not a lockfile.
     NotALock,
+}
+
+impl LockState {
+    /// initialize the `LockState` using a constant integer. This works
+    /// with the defined constants `FLAG_LOCKED` and `FLAG_UNLOCKED`.
+    pub const fn from_const(constant: u64) -> Self {
+        match constant {
+            FLAG_LOCKED => Self::Locked,
+            FLAG_UNLOCKED => Self::Unlocked,
+            _ => Self::NotALock,
+        }
+    }
+
+    pub const fn locked(&self) -> bool {
+        match self {
+            Self::Locked => true,
+            Self::Unlocked => false,
+            Self::NotALock => false,
+        }
+    }
 }
 
 /// An instance of this represents a `LockFile` that is currently locked.
@@ -97,8 +121,8 @@ impl<'a> LockFile<'a> {
     ///
     /// ## Example
     /// ```
-    /// let lock = LockFile::connect("brand_new_resource")?;
-    /// assert_eq!(lock.is_locked(), false);
+    /// let lock = LockFile::connect("brand_new_resource").await?;
+    /// assert_eq!(lock.state().locked(), false);
     /// ```
     ///
     /// This basically acts as a mutex for whatever file you are trying
@@ -121,7 +145,14 @@ impl<'a> LockFile<'a> {
         })
     }
 
-    pub async fn exists(identifier: impl AsRef<str>) -> bool {
+    /// Check if a lockfile with this same identifier already exists.
+    /// ## Example
+    /// ```
+    /// if LockFile::exists("Pipeline") { /* ... */ } else { /* ... */ }
+    /// ```
+    ///
+    /// **NOTE**: This isn't async because it's fairly simple.
+    pub fn exists(identifier: impl AsRef<str>) -> bool {
         let path = format!("{}{}.lock", temporary_directory(), identifier.as_ref());
         Path::new(&path).exists()
     }
@@ -255,6 +286,26 @@ impl<'a> LockFile<'a> {
         Ok(())
     }
 
+    /// Retreive the underlying file instance.
+    pub fn underlying_file(&'a self) -> &'a tokio::fs::File {
+        &self._fh
+    }
+
+    /// Get what state the lock is currently in.
+    /// ## Example
+    /// ```
+    /// let lock = LockFile::connect("resource").await?;
+    /// if lock.state().locked() { /* wait? skip? */ }
+    /// ```
+    ///
+    /// **NOTE**: If you get back a `LockState::NotALock`, something has externally
+    /// modifiers the file and made it no longer valid. This is out of our control.
+    pub async fn state(&self) -> Result<LockState> {
+        self.underlying_file().sync_all().await?;
+        let metadata = self.underlying_file().metadata().await?;
+        Ok(LockState::from_const(metadata.len()))
+    }
+
     /// Locks any file that is provided. This will make the file usable
     /// with `LockFile`.
     ///
@@ -302,9 +353,13 @@ impl<'a> LockFile<'a> {
 
 /// A named pipe that different processes can use to communicate with this process.
 /// done using a lockfile. We use the lockfiles size as a flag on which state its in.
-pub struct NamedPipe {
-    _path: String,
-    _lock: File,
+///
+/// The lockfile used is a `LockFile` with the same name as the pipe. They are seperated by
+/// extension. Only one file can write to the shared resource at a time, and that is when they
+/// have obtained a lock to the lock file.
+pub struct NamedPipe<'a> {
+    _pipe: File,
+    _lock: LockFile<'a>,
 }
 
 /// Get the temporary directory for this platform.
@@ -335,7 +390,20 @@ pub fn temporary_directory() -> String {
     compile_error!("not sure how to compile the path for this platform.");
 }
 
-impl NamedPipe {
+/// The result of a `write` function that was given a timeout.
+pub enum WaitResult {
+    /// The operation completed.
+    Written { count: u64 },
+    /// The operation did not complete and the timeout was exceeded.
+    TimeoutHit,
+}
+
+/// alias of `tokio::time::Duration` and makes it easier to access.
+pub type Duration = tokio::time::Duration;
+/// alias of `std::time::Instant` and makes it easier to access.
+pub type Instant = std::time::Instant;
+
+impl<'a> NamedPipe<'a> {
     /// Attempt to connect to a named pipe. If the pipe does not exist, it will be
     /// created.
     /// ## Example
@@ -346,42 +414,93 @@ impl NamedPipe {
     /// ## Errors
     /// The only errors are if we fail to create or read information about
     /// the lockfile.
-    pub async fn connect(identifier: impl AsRef<str>) -> Result<NamedPipe> {
-        todo!(
-            "connect to a named pipe with identifier: `{}`",
-            identifier.as_ref()
-        )
+    pub async fn connect(identifier: impl AsRef<str>) -> Result<NamedPipe<'a>> {
+        let lock = LockFile::connect(&identifier).await?;
+        let full_path = format!("{}{}.pipe.v1", temporary_directory(), identifier.as_ref());
+
+        let file = OpenOptions::new()
+            .write(true)
+            .read(true)
+            .create(true)
+            .open(&full_path)
+            .await?;
+
+        Ok(Self {
+            _pipe: file,
+            _lock: lock,
+        })
     }
 
-    /// Check if a pipe exists already.
-    /// ```
-    /// let exists = NamedPipe::exists("shared_resource");
-    /// ```
-    /// This only works if the lockfile exists aswell as the main shared resource.
-    pub fn exists(identifier: impl AsRef<str>) -> bool {
-        let path = format!("{}{}.")
-        return Path::new("{}{}.lock")
-    }
-
-    /// Generate unique identifiers for any string. This is not random
-    /// and just transforms the contents of the string.
+    /// Attempts to write all data into the pipe. This aqquires the lock.
+    /// If the lock is already locked, an error is returned. Otherwise, it is aqquired
+    /// and the data is written to the file.
     ///
-    /// **NOTE**: This is public because file names are selected using this function.
-    /// With this being public, anyone can understand how files are named, and therefore be able
-    /// to debug the files.
-    pub fn generate_unique_id(path: &str) -> String {
-        let mut result = String::new();
+    /// ## Example
+    /// ```
+    /// let pipe = NamedPipe::connect("shared").await?;
+    /// let bytes_written = pipe.write(b"hello, world!").await?;
+    /// ```
+    pub async fn write(&mut self, data: &[u8]) -> Result<u64> {
+        let state = self._lock.state().await?;
+        if state.locked() {
+            return Err(Error::new(
+                ErrorKind::Other,
+                "cannot write, the file is locked.",
+            ));
+        }
+        // to write we must aqquire the lock.
+        let _lock = self._lock.lock().await?;
+        self._pipe.write_all(data).await?;
 
-        for ch in path.chars() {
-            let ch = ch as u8;
-            if ch > 90 {
-                result.push((ch - 38) as char);
-            } else {
-                result.push((ch + 38) as char);
+        Ok(data.len() as u64)
+    }
+
+    /// This function will attempt to claim the lock, however, if it does not succeed,
+    /// it will wait for `timeout`. Once timeout is done, it will try again. If it fails the second
+    /// time, `WaitResult::TimeoutHit` is returned. Otherwise, the action is executed. If all goes
+    /// okay and no error occurs (will be returned in any `Err` variant) the variant
+    /// `WaitResult::Written { count }` will be returned, with count as the amount of bytes
+    /// written.
+    ///
+    /// ## Example
+    /// ```
+    /// use suave::pipe::{NamedPipe, Instant, Duration, WaitResult}
+    ///
+    /// let pipe = NamedPipe::connect("shared").await?;
+    /// let result = pipe.write_waiting(b"hello, world!", Instant::now() +
+    /// Duration::from_millis(100)).await?;
+    ///
+    /// let amount = match result {
+    ///     WaitResult::Written { count } => count,
+    ///     WaitResult::TimeoutHit => panic!("Oops! failed to aqquire lock.")
+    /// };
+    /// ```
+    pub async fn write_timeout(&mut self, data: &[u8], timeout: Instant) -> Result<WaitResult> {
+        if self._lock.state().await?.locked() {
+            let _ = sleep_until(timeout.into()).await;
+            if self._lock.state().await?.locked() {
+                return Ok(WaitResult::TimeoutHit);
             }
         }
 
-        result
+        let _ = self._lock.lock().await?;
+        let count = self.write(data).await?;
+
+        Ok(WaitResult::Written { count })
+    }
+
+    /// Read as many bytes as the received buffer can fit into the buffer.
+    /// This does not lock.
+    ///
+    /// ## Example:
+    /// ```
+    /// let pipe = NamedPipe::connect("shared").await?;
+    /// let mut buffer: [u8; 128] = [0; 128];
+    /// let amount_read = pipe.read_all(&mut buffer).await?;
+    /// ```
+    pub async fn read(&mut self, buffer: &mut [u8]) -> Result<u64> {
+        let read = self._pipe.read(buffer).await?;
+        Ok(read as u64)
     }
 }
 
