@@ -384,6 +384,7 @@ impl<'a> LockFile<'a> {
 /// have obtained a lock to the lock file.
 pub struct NamedPipe<'a> {
     _pipe: File,
+    _pipe_path: String,
     _lock: LockFile<'a>,
 }
 
@@ -452,6 +453,7 @@ impl<'a> NamedPipe<'a> {
 
         Ok(Self {
             _pipe: file,
+            _pipe_path: full_path,
             _lock: lock,
         })
     }
@@ -525,15 +527,75 @@ impl<'a> NamedPipe<'a> {
     /// ```
     ///
     /// This does not guarantee all bytes to be written into the buffer, it an also not be
-    /// guaranteed that this function will run async.
-    pub async fn read(&mut self, buffer: &mut [u8]) -> Result<u64> {
-        let read = self._pipe.read(buffer).await?;
-        Ok(read as u64)
+    /// guaranteed that this function will run async. Under the hood, this function uses
+    /// `NamedPipe::read_to_string()` and just translates the data from this function
+    /// into the buffer.
+    ///
+    /// **NOTE**: This function will never overflow the buffer, if the size of the buffer is
+    /// smaller than that of the data in the resource, the buffer will be filled with what it can
+    /// be.
+    pub async fn read_all(&mut self, buffer: &mut [u8]) -> Result<u64> {
+        let data = self.read_to_string().await?;
+        let mut pos = 0;
+        if data.len() > buffer.len() {
+            // there is more data than there is buffer space, so we just write
+            // what we can.
+            while pos < buffer.len() {
+                if let Some(ch) = data.chars().nth(pos) {
+                    buffer[pos] = ch as u8;
+                }
+                pos += 1;
+            }
+        } else {
+            // otherwise, we just copy all data from our string into the buffer.
+            while pos < data.len() {
+                if let Some(ch) = data.chars().nth(pos) {
+                    buffer[pos] = ch as u8;
+                }
+            }
+        }
+
+        Ok(pos as u64)
     }
 
+    /// Read the data into a vector. The vector will be expanded as needed.
+    ///
+    /// ## Example
+    /// ```
+    /// let pipe = NamedPipe::connect("shared").await?;
+    /// let mut contents = Vec::new();
+    /// let amount_read = pipe.read_buf(&mut contents).await?;
+    /// ```
+    ///
+    /// This function has no guarantees to read the entire file or
+    /// to even run async. Under the hood, this function uses `NamedPipe::read_to_string()`
+    /// and just translates the data received from the function into the buffer.
     pub async fn read_buf(&mut self, buffer: &mut Vec<u8>) -> Result<u64> {
-        let nbytes = self._pipe.read_buf(buffer).await?;
-        Ok(nbytes as u64)
+        let data = self.read_to_string().await?;
+        for ch in data.chars() {
+            buffer.push(ch as u8);
+        }
+        Ok(data.len() as u64)
+    }
+
+    /// Read the contents of the shared resource into a string.
+    ///
+    /// ## Example
+    /// ```
+    /// let resource = NamedPipe::connect("shared").await?;
+    /// let data = resource.read_to_string().await?;
+    ///
+    /// eprintln!("data: {}", data); // outputs whatever was in the file.
+    /// ```
+    pub async fn read_to_string(&self) -> Result<String> {
+        let path = Path::new(&self._pipe_path);
+        if !path.exists() {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                "named pipe has been deleted.",
+            ));
+        }
+        tokio::fs::read_to_string(&path).await
     }
 }
 
@@ -586,18 +648,14 @@ mod tests {
     #[tokio::test]
     async fn test_shared_pipe_write_read() -> Result<()> {
         let data = b"other data!";
-        let mut pipe = NamedPipe::connect("shared_resource").await?;
+        let mut pipe = NamedPipe::connect("shared_rw").await?;
 
-        pipe.write(data).await?;
-        let mut buf = Vec::new();
-        let r = pipe.read_buf(&mut buf).await?;
+        let amount_written = pipe.write(data).await?;
+        eprintln!("written {amount_written} bytes");
+        let data = pipe.read_to_string().await?;
 
-        assert!(
-            r == 11,
-            "didnt read 11 bytes after writing 11 bytes? (got {})",
-            r
-        );
-        assert!(buf == *data);
+        assert!(data.len() == 11, "data length is invalid. {}", data.len());
+        assert_eq!(data, "other data!");
 
         Ok(())
     }
