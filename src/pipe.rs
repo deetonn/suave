@@ -77,8 +77,12 @@ impl<'lock> Lock<'lock> {
     /// this instance is dropped, `parent.unlock()` is called.
     ///
     /// **NOTE**: Shouldn't be called manually usually.
-    pub fn new(parent: &'lock LockFile) -> Self {
-        Self { parent }
+    pub async fn new(parent: &'lock LockFile<'lock>) -> Result<Lock<'lock>> {
+        let is_ok = parent.try_lock().await?;
+        if !is_ok {
+            return Err(Error::new(ErrorKind::Other, "The file is already locked."));
+        }
+        Ok(Self { parent })
     }
 }
 
@@ -99,6 +103,7 @@ impl<'lock> Drop for Lock<'lock> {
         }
 
         let file = file.unwrap();
+        let _ = file.sync_all();
         match file.set_len(FLAG_UNLOCKED) {
             Ok(_) => {}
             Err(e) => panic!("failed to unlock file by `file.set_len(...)`: {}", e),
@@ -117,7 +122,13 @@ pub struct LockFile<'a> {
 
 impl<'a> LockFile<'a> {
     /// Connect to the lock, storing information about it. This connection
-    /// will be created if the lock does not yet exist.
+    /// will be created if the lock does not yet exist. This lock will be located within the
+    /// systems temporary directory.
+    ///
+    /// ### On Windows
+    /// Path: C:\Users\UserName\AppData\Local\Temp\
+    /// ### On Gnu/linux
+    /// Path: /tmp/
     ///
     /// ## Example
     /// ```
@@ -127,7 +138,7 @@ impl<'a> LockFile<'a> {
     ///
     /// This basically acts as a mutex for whatever file you are trying
     /// to restrict to one writer at a time.
-    pub async fn connect(name: impl AsRef<str>) -> Result<LockFile<'a>> {
+    pub async fn temp(name: impl AsRef<str>) -> Result<LockFile<'a>> {
         let true_path = {
             let tmp_dir = temporary_directory();
             format!("{}{}.lock", tmp_dir, name.as_ref())
@@ -140,6 +151,24 @@ impl<'a> LockFile<'a> {
 
         Ok(Self {
             _path: true_path,
+            _fh: file_handle,
+            _phantom: PhantomData,
+        })
+    }
+
+    /// Create the lock in the directory `path` under `name`.
+    ///
+    /// The usual `LockFile::connect()` return automatically creates the file in a temporary
+    /// directory.
+    /// ## Example
+    pub async fn at(path: impl AsRef<Path>, name: impl AsRef<str>) -> Result<LockFile<'a>> {
+        let path = format!("{}{}.lock", path.as_ref().display(), name.as_ref());
+
+        let file_handle = open_rw(&path).await?;
+        file_handle.sync_all().await?;
+
+        Ok(Self {
+            _path: path,
             _fh: file_handle,
             _phantom: PhantomData,
         })
@@ -218,12 +247,8 @@ impl<'a> LockFile<'a> {
     /// ```
     pub async fn lock(&'a self) -> Result<Lock<'a>> {
         self._fh.sync_all().await?;
-        let is_locked = self.try_lock().await?;
-        if is_locked {
-            Ok(Lock::new(self))
-        } else {
-            Err(Error::new(ErrorKind::Other, "the file is already locked."))
-        }
+        let lock = Lock::new(self).await?;
+        Ok(lock)
     }
 
     /// Attempt the unlock the file. Only call this function if you know that you
@@ -415,7 +440,7 @@ impl<'a> NamedPipe<'a> {
     /// The only errors are if we fail to create or read information about
     /// the lockfile.
     pub async fn connect(identifier: impl AsRef<str>) -> Result<NamedPipe<'a>> {
-        let lock = LockFile::connect(&identifier).await?;
+        let lock = LockFile::temp(&identifier).await?;
         let full_path = format!("{}{}.pipe.v1", temporary_directory(), identifier.as_ref());
 
         let file = OpenOptions::new()
@@ -475,7 +500,7 @@ impl<'a> NamedPipe<'a> {
     ///     WaitResult::TimeoutHit => panic!("Oops! failed to aqquire lock.")
     /// };
     /// ```
-    pub async fn write_timeout(&mut self, data: &[u8], timeout: Instant) -> Result<WaitResult> {
+    pub async fn write_timeout(&'a mut self, data: &[u8], timeout: Instant) -> Result<WaitResult> {
         if self._lock.state().await?.locked() {
             let _ = sleep_until(timeout.into()).await;
             if self._lock.state().await?.locked() {
@@ -483,7 +508,7 @@ impl<'a> NamedPipe<'a> {
             }
         }
 
-        let _ = self._lock.lock().await?;
+        // self.write(...) deals with the lock.
         let count = self.write(data).await?;
 
         Ok(WaitResult::Written { count })
@@ -498,9 +523,17 @@ impl<'a> NamedPipe<'a> {
     /// let mut buffer: [u8; 128] = [0; 128];
     /// let amount_read = pipe.read_all(&mut buffer).await?;
     /// ```
+    ///
+    /// This does not guarantee all bytes to be written into the buffer, it an also not be
+    /// guaranteed that this function will run async.
     pub async fn read(&mut self, buffer: &mut [u8]) -> Result<u64> {
         let read = self._pipe.read(buffer).await?;
         Ok(read as u64)
+    }
+
+    pub async fn read_buf(&mut self, buffer: &mut Vec<u8>) -> Result<u64> {
+        let nbytes = self._pipe.read_buf(buffer).await?;
+        Ok(nbytes as u64)
     }
 }
 
@@ -509,13 +542,13 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn test_create_lockfile() -> Result<()> {
-        LockFile::connect("shared_resource").await?;
+        LockFile::temp("shared_resource").await?;
         Ok(())
     }
 
     #[tokio::test]
     async fn test_lockfile_lock() -> Result<()> {
-        let resource = LockFile::connect("shared_resource_2").await?;
+        let resource = LockFile::temp("shared_resource_2").await?;
         let lock = resource.lock().await?;
 
         assert!(resource.is_locked().await?);
@@ -527,7 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lockfile_multiple_opens() -> Result<()> {
-        let resource = LockFile::connect("shared_resource_3").await?;
+        let resource = LockFile::temp("shared_resource_3").await?;
         let _lock = resource.lock().await?;
 
         assert!(resource.is_locked().await?);
@@ -535,6 +568,36 @@ mod tests {
 
         // should fail because its already locked above.
         assert!(faulty_lock.is_err());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_shared_pipe_write() -> Result<()> {
+        let data = b"hello, world!";
+        let mut pipe = NamedPipe::connect("shared_resource").await?;
+
+        let count = pipe.write(data).await?;
+        assert!(count == 13, "count was {}", count);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_shared_pipe_write_read() -> Result<()> {
+        let data = b"other data!";
+        let mut pipe = NamedPipe::connect("shared_resource").await?;
+
+        pipe.write(data).await?;
+        let mut buf = Vec::new();
+        let r = pipe.read_buf(&mut buf).await?;
+
+        assert!(
+            r == 11,
+            "didnt read 11 bytes after writing 11 bytes? (got {})",
+            r
+        );
+        assert!(buf == *data);
 
         Ok(())
     }
