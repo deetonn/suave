@@ -26,7 +26,7 @@ let lockfile = LockFile::temp().await?;
 
 This implementation uses `LockFile` internally to sync writing.
 
-```
+```rs
 use suave::pipe::NamedPipe;
 
 // connect to this shared resource
@@ -40,7 +40,7 @@ eprintln!("wrote {} bytes to our shared resource!", nbytes);
 
 This implementation uses `LockFile` internally to sync writing.
 
-```
+```rs
 use suave::clipboard::Clipboard;
 
 let clipboard = Clipboard::connect().await?;
