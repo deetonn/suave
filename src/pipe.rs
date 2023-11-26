@@ -1,5 +1,6 @@
 use std::{
-    io::{Error, ErrorKind},
+    future::Future,
+    io::{Error, ErrorKind, Write},
     marker::PhantomData,
     path::Path,
 };
@@ -10,7 +11,8 @@ use std::{
 
 use tokio::{
     fs::{File, OpenOptions},
-    io::AsyncWriteExt,
+    io::{AsyncWrite, AsyncWriteExt},
+    pin,
     time::sleep_until,
 };
 
@@ -610,6 +612,12 @@ impl<'a> NamedPipe<'a> {
             ));
         }
         tokio::fs::read_to_string(&path).await
+    }
+}
+
+impl<'a> Into<LockFile<'a>> for NamedPipe<'a> {
+    fn into(self) -> LockFile<'a> {
+        self._lock
     }
 }
 
