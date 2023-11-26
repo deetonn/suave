@@ -1,0 +1,71 @@
+use std::io::{Error, ErrorKind};
+
+use crate::pipe::{Duration, Instant, LockFile, Result};
+/// The clipboard (global) that other processes can also read and write to.
+use arboard::Clipboard as ArClipboard;
+
+pub const CLIPBOARD_LOCKFILE: &str = "suave_clipboard";
+
+/// This provides methods of using the clipboard to communicate,
+/// however does use a lockfile to avoid bad writes.
+pub struct Clipboard<'a> {
+    lock: LockFile<'a>,
+}
+
+/// What kind of clipboard write is occuring.
+pub enum WriteKind {
+    /// Attempt to aqquire the lock and give up after one attempt,
+    Immediate,
+    /// Do not stop trying
+    Guarantee,
+    /// Give up after N attempts
+    KeepTrying(usize),
+    /// Give up after N attempts, with a wait of X between each attempt.
+    KeepTryingTimeout(usize, Duration),
+}
+
+impl<'a> Clipboard<'a> {
+    /// Connect to the clipboard lock. The instance returned provides a wrapper around
+    /// `arboard::Clipboard` that is locked and allows each process to write one at a time.
+    ///
+    /// **NOTE**: If you want to connect without a lock at all, please use
+    /// `ReadonlyClipboard`.
+    ///
+    /// ```
+    /// let clipboard = Clipboard::connect().await?;
+    /// eprintln!("we are now listening to the clipboard!");
+    /// ```
+    pub async fn connect() -> Result<Clipboard<'a>> {
+        let lock = LockFile::temp(CLIPBOARD_LOCKFILE).await?;
+
+        Ok(Self { lock })
+    }
+
+    /// Read whatever is currently inside of the clipboard.
+    /// **NOTE**: This function does not lock and all processes can
+    /// read at the same time without bother.
+    ///
+    /// # Example to get immediate contents
+    /// ```
+    /// let contents = Clipboard::connect().await?.read()?;
+    /// eprintln!("Clipboard contents: {}", contents);
+    /// ```
+    ///
+    /// This function is not async as it does not interact with the lockfile.
+    pub fn read(&self) -> Result<String> {
+        let mut cb = ArClipboard::new().map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?;
+        let response = cb.get().text();
+
+        match response {
+            Ok(contents) => Ok(contents),
+            Err(e) => Err(Error::new(ErrorKind::Other, e.to_string())),
+        }
+    }
+
+    /// Write `content` into the clipboard. This will attempt to aqquire the lock,
+    /// if we cannot aqquire instantly, an error is returned. Please use the method
+    /// `write`
+    pub async fn write(&self, content: impl Into<String>) -> Result<()> {}
+}
+
+pub struct ReadonlyClipboard {}

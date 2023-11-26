@@ -558,6 +558,20 @@ impl<'a> NamedPipe<'a> {
         Ok(pos as u64)
     }
 
+    /// The actual path to the file that is being used.
+    ///
+    /// # Example
+    /// ```
+    /// let pipe = NamedPipe::connect("shared").await?;
+    /// assert!(pipe.path().display() == "/tmp/shared.pipe.v1");
+    /// ```
+    ///
+    /// The above example is for linux machines, on windows the path would resole to
+    /// `C:\Users\UserName\AppData\Local\Temp\shared.pipe.v1`
+    pub fn path(&'a self) -> &'a Path {
+        Path::new(&self._pipe_path)
+    }
+
     /// Read the data into a vector. The vector will be expanded as needed.
     ///
     /// ## Example

@@ -7,3 +7,6 @@
 
 /// Anything pipe related, including lock files, shared pipes etc...
 pub mod pipe;
+
+/// Anything related to clipboard IPC.
+pub mod clipboard;
