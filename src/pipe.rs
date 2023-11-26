@@ -1,6 +1,5 @@
 use std::{
-    future::Future,
-    io::{Error, ErrorKind, Write},
+    io::{Error, ErrorKind},
     marker::PhantomData,
     path::Path,
 };
@@ -11,8 +10,7 @@ use std::{
 
 use tokio::{
     fs::{File, OpenOptions},
-    io::{AsyncWrite, AsyncWriteExt},
-    pin,
+    io::AsyncWriteExt,
     time::sleep_until,
 };
 
