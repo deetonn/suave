@@ -10,7 +10,7 @@ Any and all methods should be supported and they are being added all the time. C
 
 **NOTE**: This implementation requires no actual reading or writing.
 
-```rs
+```rust
 use suave::pipe::LockFile;
 
 let lockfile = LockFile::temp().await?;
@@ -26,7 +26,7 @@ let lockfile = LockFile::temp().await?;
 
 This implementation uses `LockFile` internally to sync writing.
 
-```rs
+```rust
 use suave::pipe::NamedPipe;
 
 // connect to this shared resource
@@ -40,7 +40,7 @@ eprintln!("wrote {} bytes to our shared resource!", nbytes);
 
 This implementation uses `LockFile` internally to sync writing.
 
-```rs
+```rust
 use suave::clipboard::Clipboard;
 
 let clipboard = Clipboard::connect().await?;
