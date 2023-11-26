@@ -1,13 +1,13 @@
 [package]
 name = "suave"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = ["Deeton Rushton"]
-description = "Anything interprocess communication is here!"
+description = "Multi-process communication utility library."
 readme = "README.md"
 repository = "https://github.com/deetonn/suave"
 license = "MIT"
-keywords = ["network", "process", "system", "lowlevel"]
+keywords = ["process", "system", "lowlevel", "multiprocess", "async"]
 rust-version = "1.73.0"
 include = ["/src", "LICENSE"]
 publish = true

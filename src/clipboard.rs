@@ -1,9 +1,11 @@
 use std::io::{Error, ErrorKind};
 
-use crate::pipe::{Duration, Instant, LockFile, Result};
+use crate::pipe::{Duration, LockFile, Result};
 /// The clipboard (global) that other processes can also read and write to.
 use arboard::Clipboard as ArClipboard;
 
+/// The name of the lockfile that is created for the clipboard.
+/// It will live in `($TEMP)/suave_clipboard`
 pub const CLIPBOARD_LOCKFILE: &str = "suave_clipboard";
 
 /// This provides methods of using the clipboard to communicate,

@@ -10,7 +10,7 @@ use std::{
 
 use tokio::{
     fs::{File, OpenOptions},
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncWriteExt,
     time::sleep_until,
 };
 
