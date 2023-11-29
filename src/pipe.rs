@@ -613,9 +613,10 @@ impl<'a> NamedPipe<'a> {
     }
 }
 
-impl<'a> Into<LockFile<'a>> for NamedPipe<'a> {
-    fn into(self) -> LockFile<'a> {
-        self._lock
+/// Easily extract the lock for a NamedPipe for use elsewhere.
+impl<'a> From<NamedPipe<'a>> for LockFile<'a> {
+    fn from(value: NamedPipe<'a>) -> Self {
+        value._lock
     }
 }
 

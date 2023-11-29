@@ -489,6 +489,7 @@ name = "suave"
 version = "0.2.2"
 dependencies = [
  "arboard",
+ "libc",
  "tokio",
 ]
 
