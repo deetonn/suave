@@ -4,6 +4,8 @@ up and working. It is 100% async and written in pure rust.
 
 Any and all methods should be supported and they are being added all the time. Come get involved.
 
+**NOTE**: The `queue` feature is not yet stable.
+
 # Features
 
 ## Easily create lockfiles

@@ -1,6 +1,6 @@
 [package]
 name = "suave"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 authors = ["Deeton Rushton"]
 description = "Multi-process communication utility library."
